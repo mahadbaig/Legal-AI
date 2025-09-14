@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+streamlit
+langchain
+langchain-groq
+groq
+chromadb
+PyPDF2
+python-docx
+sendgrid
+python-multipart
+python-dotenv
+requests
+python-json-logger
+prometheus-client
+pytest
