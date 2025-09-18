@@ -16,9 +16,15 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 # Load environment variables
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Initialize Chroma client & embeddings
-chroma_client = chromadb.PersistentClient(path="C:\Mahad\Agentic AI Bootcamp\Capstone Project\Legal AI\Chroma DB")
+chroma_client = chromadb.PersistentClient(path="C:/Mahad/Agentic AI Bootcamp/Capstone Project/Legal AI/Chroma DB")
+logger.info("Initializing embedding model...")
 embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+logger.info("Embedding model loaded successfully")
 
 # Create / get collection
 collection = chroma_client.get_or_create_collection(name="legal_docs")
@@ -34,8 +40,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logger = logging.getLogger("uvicorn.error")
-
 @app.get("/")
 def health():
     """Health check endpoint"""
@@ -47,52 +51,78 @@ async def parse_file(file: UploadFile = File(...)):
     Accepts PDF, DOCX, or TXT and extracts raw text.
     Splits into chunks, embeds, and stores in Chroma.
     """
+    logger.info(f"Starting to parse file: {file.filename}")
+    
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded")
 
     filename = file.filename.lower()
     try:
+        # Read file contents
+        logger.info("Reading file contents...")
         contents = await file.read()
+        logger.info(f"File size: {len(contents)} bytes")
+        
         text = ""
 
         if filename.endswith(".pdf"):
+            logger.info("Processing PDF file...")
             reader = PdfReader(io.BytesIO(contents))
-            for page in reader.pages:
+            logger.info(f"PDF has {len(reader.pages)} pages")
+            for i, page in enumerate(reader.pages):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
+                logger.info(f"Processed page {i+1}/{len(reader.pages)}")
 
         elif filename.endswith((".docx", ".doc")):
+            logger.info("Processing DOCX file...")
             doc = Document(io.BytesIO(contents))
             for p in doc.paragraphs:
                 text += p.text + "\n"
 
         else:
             # assume text file
+            logger.info("Processing text file...")
             text = contents.decode(errors="ignore")
 
+        logger.info(f"Extracted text length: {len(text)} characters")
+
         # Clear previous docs from collection (fresh start per upload)
-        collection.delete(where={})
+        logger.info("Clearing previous documents...")
+        existing_ids = collection.get()["ids"]
+        if existing_ids and len(existing_ids) > 0:
+            collection.delete(ids=existing_ids)
 
         # Split into chunks for embedding
+        logger.info("Splitting text into chunks...")
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_text(text)
+        logger.info(f"Created {len(chunks)} chunks")
 
         # Embed and store in Chroma
+        logger.info("Generating embeddings...")
         embeddings = embedding_model.embed_documents(chunks)
+        logger.info(f"Generated {len(embeddings)} embeddings")
+        
+        logger.info("Storing chunks in database...")
         for i, chunk in enumerate(chunks):
             collection.add(
                 documents=[chunk],
                 embeddings=[embeddings[i]],
                 ids=[f"{file.filename}_{i}"]
             )
+            if (i + 1) % 10 == 0:  # Log every 10 chunks
+                logger.info(f"Stored {i+1}/{len(chunks)} chunks")
+
+        logger.info("File processing completed successfully")
 
     except Exception as e:
-        logger.exception("Parsing error")
-        raise HTTPException(status_code=500, detail=f"Parsing failed: {e}")
+        logger.exception(f"Parsing error for file {file.filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Parsing failed: {str(e)}")
 
     # return preview
-    return {"filename": file.filename, "chunks_stored": len(chunks)}
+    return {"filename": file.filename, "chunks_stored": len(chunks), "text_length": len(text)}
 
 # Input model for query
 class QueryRequest(BaseModel):

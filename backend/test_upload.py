@@ -1,7 +1,7 @@
 import requests
 
 url = "http://127.0.0.1:8000/parse"
-file_path = r"C:\Mahad\Agentic AI Bootcamp\Capstone Project\Legal AI\Agentic_AI_Capston_Project.pdf"
+file_path = "C:/Mahad/Agentic AI Bootcamp/Capstone Project/Legal AI/Agreement_TilesSupply_20150726.pdf"
 
 with open(file_path, "rb") as f:
     files = {"file": (file_path, f, "application/pdf")}
