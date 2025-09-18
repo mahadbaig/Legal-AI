@@ -1,6 +1,7 @@
 # backend/app.py
 import io
 import logging
+import os
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
@@ -8,10 +9,19 @@ from docx import Document
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from groq import Groq
-import os
+import chromadb
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Load environment variables
 load_dotenv()
+
+# Initialize Chroma client & embeddings
+chroma_client = chromadb.PersistentClient(path="C:\Mahad\Agentic AI Bootcamp\Capstone Project\Legal AI\Chroma DB")
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+# Create / get collection
+collection = chroma_client.get_or_create_collection(name="legal_docs")
 
 app = FastAPI(title="AI Legal Capstone - Backend")
 
@@ -35,9 +45,8 @@ def health():
 async def parse_file(file: UploadFile = File(...)):
     """
     Accepts PDF, DOCX, or TXT and extracts raw text.
-    Stores globally for demo.
+    Splits into chunks, embeds, and stores in Chroma.
     """
-    global parsed_text
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded")
 
@@ -62,68 +71,83 @@ async def parse_file(file: UploadFile = File(...)):
             # assume text file
             text = contents.decode(errors="ignore")
 
-        parsed_text = text  # Save for later querying
+        # Clear previous docs from collection (fresh start per upload)
+        collection.delete(where={})
+
+        # Split into chunks for embedding
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_text(text)
+
+        # Embed and store in Chroma
+        embeddings = embedding_model.embed_documents(chunks)
+        for i, chunk in enumerate(chunks):
+            collection.add(
+                documents=[chunk],
+                embeddings=[embeddings[i]],
+                ids=[f"{file.filename}_{i}"]
+            )
 
     except Exception as e:
         logger.exception("Parsing error")
         raise HTTPException(status_code=500, detail=f"Parsing failed: {e}")
 
     # return preview
-    return {"filename": file.filename, "text": text[:500]}
+    return {"filename": file.filename, "chunks_stored": len(chunks)}
 
 # Input model for query
 class QueryRequest(BaseModel):
     query: str
 
-
 # Initialize Groq client
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-
 @app.post("/query")
 async def query_doc(req: QueryRequest):
-    global parsed_text
-    if not parsed_text:
-        return {"answer": "❌ No document uploaded yet. Please upload a PDF first."}
-
-    # Prepare prompt for LLM
-
-    prompt = f"""
-    You are an AI Legal Assistant specializing in contract analysis and legal reasoning. 
-    Your role is to carefully review the document context and provide clear, accurate, and practical legal insights.
-
-    ### Context:
-    The following is an excerpt of a legal/contractual document (partial text for analysis, not full contract):
-
-    {parsed_text[:2000]}
-
-    ### Instructions:
-    - ONLY use information present in the document context. 
-    - If the question cannot be fully answered from the provided text, say so explicitly and suggest what additional sections would be required. 
-    - Provide your answer in a structured format:
-      1. **Direct Answer** – address the user’s query clearly.
-      2. **Relevant Clauses or Evidence** – cite exact snippets from the text that support your answer.
-      3. **Risks / Ambiguities** – highlight any legal risks, unclear language, or missing information.
-      4. **Practical Implications** – explain what this means for the user in plain English.
-    - Do NOT invent laws or clauses not present in the document.
-    - Maintain a professional, precise, and objective legal tone.
-
-    ### Question:
-    {req.query}
-    """
+    if collection.count() == 0:
+        return {"answer": "❌ No document uploaded yet. Please upload a file first."}
 
     try:
+        # Embed the query
+        query_embedding = embedding_model.embed_query(req.query)
+
+        # Retrieve top 3 relevant chunks
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=3
+        )
+        context = " ".join(results["documents"][0])
+
+        prompt = f"""
+        You are an AI Legal Assistant specializing in contract analysis and legal reasoning. 
+        Use the following document context to answer the question.
+
+        ### Context:
+        {context}
+
+        ### Question:
+        {req.query}
+
+        ### Instructions:
+        - ONLY use information present in the document context. 
+        - If the question cannot be fully answered, say so explicitly.
+        - Provide your answer in this format:
+          1. **Direct Answer**
+          2. **Relevant Clauses**
+          3. **Risks / Ambiguities**
+          4. **Practical Implications**
+        """
+
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="moonshotai/kimi-k2-instruct-0905"  # Groq’s free fast model
+            model="moonshotai/kimi-k2-instruct-0905"  # adjust if needed
         )
 
         answer = response.choices[0].message.content
         return {"answer": answer}
 
     except Exception as e:
+        logger.exception("Query error")
         return {"answer": f"⚠️ Error: {str(e)}"}
-
 
 @app.post("/analyze")
 async def analyze(payload: dict):
