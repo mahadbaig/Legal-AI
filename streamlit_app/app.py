@@ -1,53 +1,34 @@
-# streamlit_app/app.py
 import streamlit as st
 import requests
-import os
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+# Backend URL
+BACKEND_URL = "http://127.0.0.1:8000"
 
-st.set_page_config(page_title="AI Legal Contract Analyzer", layout="wide")
-st.title("📑 AI Legal Contract Analyzer")
+st.title("⚖️ AI Legal Contract Analyzer")
 
-uploaded = st.file_uploader("Upload a contract (PDF or DOCX)", type=["pdf", "docx", "doc"])
+# File Upload
+uploaded_file = st.file_uploader("Upload a legal document (PDF)", type=["pdf"])
 
-if uploaded:
-    with st.spinner("Uploading and parsing..."):
-        files = {"file": (uploaded.name, uploaded.getvalue())}
-        resp = requests.post(f"{BACKEND_URL}/parse", files=files, timeout=60)
+if uploaded_file is not None:
+    files = {"file": (uploaded_file.name, uploaded_file, "application/pdf")}
+    response = requests.post(f"{BACKEND_URL}/parse", files=files)
 
-        if resp.status_code != 200:
-            st.error(f"Parsing failed: {resp.text}")
+    if response.status_code == 200:
+        st.success(f"File '{uploaded_file.name}' parsed successfully!")
+    else:
+        st.error("Failed to parse the PDF.")
+
+# Question Answering
+st.subheader("Ask a Question")
+user_query = st.text_input("Enter your question about the document")
+
+if st.button("Get Answer"):
+    if user_query.strip() == "":
+        st.warning("Please enter a question.")
+    else:
+        response = requests.post(f"{BACKEND_URL}/query", json={"query": user_query})
+        if response.status_code == 200:
+            st.write("### Answer:")
+            st.write(response.json().get("answer"))
         else:
-            data = resp.json()
-            st.subheader("Parsed Text (Preview)")
-            st.text_area("Contract text", data.get("text", "")[:2000], height=300)
-
-            if st.button("Analyze Contract"):
-                with st.spinner("Analyzing..."):
-                    analyze_resp = requests.post(
-                        f"{BACKEND_URL}/analyze",
-                        json={"text": data.get("text", "")},
-                        timeout=120
-                    )
-                    if analyze_resp.status_code != 200:
-                        st.error(f"Analysis failed: {analyze_resp.text}")
-                    else:
-                        result = analyze_resp.json()
-                        clauses = result.get("clauses", [])
-
-                        if not clauses:
-                            st.success("✅ No risky clauses detected (stub analysis).")
-                        else:
-                            st.subheader("⚠️ Detected Clauses")
-                            for c in clauses:
-                                st.markdown(
-                                    f"""
-                                    **Keyword:** {c['clause_keyword']}  
-                                    **Risk:** {c['risk_level']}  
-                                    **Explanation:** {c['explanation']}  
-                                    """
-                                )
-                                st.info(c["snippet"])
+            st.error("Error fetching answer from backend.")
