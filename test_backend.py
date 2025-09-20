@@ -9,7 +9,7 @@ import os
 def test_backend_health():
     """Test if backend is running"""
     try:
-        response = requests.get("http://127.0.0.1:8000/", timeout=5)
+        response = requests.get("http://127.0.0.1:8001/", timeout=5)
         if response.status_code == 200:
             print("✅ Backend is running and healthy")
             return True

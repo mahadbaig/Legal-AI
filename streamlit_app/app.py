@@ -11,55 +11,69 @@ uploaded_file = st.file_uploader("Upload a legal document (PDF, DOCX, TXT)", typ
 
 if uploaded_file is not None:
     st.info(f"📄 Uploading file: {uploaded_file.name} ({uploaded_file.size} bytes)")
-    
+
+    # Detect MIME type
+    if uploaded_file.type:
+        mime_type = uploaded_file.type
+    else:
+        # fallback by extension
+        if uploaded_file.name.endswith(".pdf"):
+            mime_type = "application/pdf"
+        elif uploaded_file.name.endswith(".docx"):
+            mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        else:
+            mime_type = "text/plain"
+
     # Show progress
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
+
     try:
         status_text.text("🔄 Processing file...")
         progress_bar.progress(25)
-        
-        files = {"file": (uploaded_file.name, uploaded_file, "application/pdf")}
-        
+
+        # Read file bytes
+        file_bytes = uploaded_file.read()
+        files = {"file": (uploaded_file.name, file_bytes, mime_type)}
+
         status_text.text("📤 Uploading to backend...")
         progress_bar.progress(50)
-        
-        response = requests.post(f"{BACKEND_URL}/parse", files=files, timeout=300)  # 5 minute timeout
-        
+
+        response = requests.post(f"{BACKEND_URL}/parse", files=files, timeout=300)
+
         progress_bar.progress(75)
-        
+
         if response.status_code == 200:
             result = response.json()
             progress_bar.progress(100)
             status_text.text("✅ Processing complete!")
-            
+
             st.success(f"File '{uploaded_file.name}' parsed successfully!")
-            st.info(f"📊 **Processing Results:**")
+            st.info("📊 **Processing Results:**")
             st.write(f"- **Chunks created:** {result.get('chunks_stored', 'N/A')}")
-            st.write(f"- **Text length:** {result.get('text_length', 'N/A')} characters")
-            
+
         else:
             progress_bar.progress(0)
             status_text.text("❌ Processing failed")
             st.error(f"Failed to parse the file. Status: {response.status_code}")
             if response.text:
                 st.error(f"Error details: {response.text}")
-                
+
     except requests.exceptions.Timeout:
         progress_bar.progress(0)
         status_text.text("⏰ Request timed out")
-        st.error("⏰ The file processing took too long. Please try with a smaller file or check your internet connection.")
-        
+        st.error("⏰ The file processing took too long.")
+
     except requests.exceptions.ConnectionError:
         progress_bar.progress(0)
         status_text.text("🔌 Connection error")
-        st.error("🔌 Could not connect to the backend server. Please make sure the backend is running on http://127.0.0.1:8000")
-        
+        st.error("🔌 Could not connect to the backend server.")
+
     except Exception as e:
         progress_bar.progress(0)
         status_text.text("❌ Unexpected error")
         st.error(f"❌ An unexpected error occurred: {str(e)}")
+
 
 # Question Answering
 st.subheader("Ask a Question")
