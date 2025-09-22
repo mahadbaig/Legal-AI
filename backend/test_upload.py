@@ -22,3 +22,30 @@ resp = client.chat.completions.create(
 )
 
 print(resp.choices[0].message["content"])
+
+import os
+from dotenv import load_dotenv
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+
+load_dotenv()
+
+
+def test_sendgrid():
+    message = Mail(
+        from_email=os.getenv("FROM_EMAIL"),
+        to_emails="your-test-email@gmail.com",
+        subject="Test Email",
+        plain_text_content="This is a test email."
+    )
+
+    try:
+        sg = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
+        response = sg.send(message)
+        print(f"Email sent! Status: {response.status_code}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+    test_sendgrid()

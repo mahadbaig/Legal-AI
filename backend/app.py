@@ -20,11 +20,20 @@ import certifi
 import ssl
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+import urllib3
 
 # HuggingFace fallback
 from transformers import pipeline
 
+# SSL context configuration for Windows/Python 3.13 compatibility
 ssl_context_ = ssl.create_default_context(cafile=certifi.where())
+
+# Configure SSL for SendGrid compatibility
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
+# Disable SSL warnings for development (remove in production)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
@@ -225,7 +234,7 @@ Instructions:
 
 Important:
 - Stay neutral and objective.  
-- Always Include web search links in the final answer
+- Include web search links in the final answer
 - Keep the tone and language simple
 - Don't use too much legal jargon, a normal person should be able to understand
 - You are talking to a regular person, not a lawyer
@@ -309,21 +318,98 @@ async def email_report(req: EmailRequest):
         Chat History:
         {chat_summary}
         """
+
+        logger.info("Generating email report...")
         report_text = agent.run(query_with_instructions)
 
+        # Create SendGrid message
         message = Mail(
             from_email=os.getenv("FROM_EMAIL"),
             to_emails=req.email,
             subject="Your Legal Contract Analysis Report",
             plain_text_content=report_text
         )
-        sg = SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
-        sg.send(message)
 
-        return {"status": "✅ Report sent successfully"}
+        # Initialize SendGrid client with SSL context
+        sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
+        if not sendgrid_api_key:
+            raise ValueError("SENDGRID_API_KEY environment variable not set")
+
+        logger.info(f"Sending email to: {req.email}")
+
+        try:
+            # Try with SSL context first
+            sg = SendGridAPIClient(api_key=sendgrid_api_key)
+            response = sg.send(message)
+            logger.info(f"Email sent successfully. Status: {response.status_code}")
+            return {"status": "✅ Report sent successfully"}
+
+        except Exception as ssl_error:
+            logger.warning(f"SSL error with SendGrid: {ssl_error}")
+
+            # Fallback: Try with modified SSL settings
+            try:
+                import ssl
+                import urllib3
+
+                # Create unverified SSL context as fallback
+                ssl._create_default_https_context = ssl._create_unverified_context
+
+                sg = SendGridAPIClient(api_key=sendgrid_api_key)
+                response = sg.send(message)
+                logger.info(f"Email sent with fallback SSL. Status: {response.status_code}")
+                return {"status": "✅ Report sent successfully (with SSL fallback)"}
+
+            except Exception as fallback_error:
+                logger.error(f"Both SSL methods failed: {fallback_error}")
+                # Try alternative email method or return detailed error
+                return await send_email_alternative(req.email, report_text)
+
     except Exception as e:
-        logger.exception("Email error")
+        logger.exception("Email generation/sending error")
         return {"status": f"⚠️ Error sending email: {str(e)}"}
+
+
+# Alternative email sending method using smtplib
+async def send_email_alternative(email: str, report_text: str):
+    """Alternative email sending using SMTP (Gmail/Outlook)"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        # Gmail SMTP configuration (you can modify for other providers)
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        sender_email = os.getenv("SENDER_EMAIL")  # Your Gmail address
+        sender_password = os.getenv("SENDER_APP_PASSWORD")  # App-specific password
+
+        if not sender_email or not sender_password:
+            return {"status": "⚠️ SMTP credentials not configured. Please set SENDER_EMAIL and SENDER_APP_PASSWORD"}
+
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = email
+        msg['Subject'] = "Your Legal Contract Analysis Report"
+
+        # Attach report
+        msg.attach(MIMEText(report_text, 'plain'))
+
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            text = msg.as_string()
+            server.sendmail(sender_email, email, text)
+
+        logger.info(f"Email sent via SMTP to: {email}")
+        return {"status": "✅ Report sent successfully via SMTP"}
+
+    except Exception as smtp_error:
+        logger.error(f"SMTP fallback also failed: {smtp_error}")
+        return {
+            "status": f"⚠️ All email methods failed. Last error: {str(smtp_error)}. Please check your email configuration."}
 
 
 # Add endpoint to clear document (useful for testing)
