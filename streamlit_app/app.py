@@ -49,6 +49,12 @@ if not st.session_state.doc_uploaded:
                         st.success(f"✅ Document '{result['filename']}' uploaded & parsed successfully!")
                         st.success(f"📄 Processed {result.get('length', 0)} characters")
 
+                        # Show vector database status
+                        if result.get("vector_db_enabled", False):
+                            st.success("🚀 AI-powered semantic search enabled!")
+                        else:
+                            st.info("📝 Using keyword-based search (ChromaDB not available)")
+
                         # Update session state
                         st.session_state.doc_uploaded = True
                         st.session_state.filename = result['filename']
@@ -75,6 +81,14 @@ if st.session_state.doc_uploaded and not st.session_state.chat_mode:
     if status:
         if status["has_document"]:
             st.success(f"✅ Backend has document: {status['filename']} ({status['text_length']} chars)")
+
+            # Show vector database status
+            if status.get("vector_store_ready", False):
+                st.success("🚀 AI semantic search ready")
+            elif status.get("vector_db_available", False):
+                st.info("⏳ Vector database available but not loaded")
+            else:
+                st.info("📝 Using keyword search only")
         else:
             st.error("❌ Backend doesn't have the document - please re-upload")
             if st.button("🔄 Reset and Try Again"):
@@ -200,7 +214,29 @@ with st.sidebar:
         else:
             st.error("Cannot connect to backend")
 
+    # Vector search test
+    if st.session_state.doc_uploaded:
+        st.subheader("🔍 Test Vector Search")
+        test_query = st.text_input("Test query:")
+        if test_query and st.button("Search"):
+            try:
+                response = requests.post(f"{BACKEND_URL}/vector-search", json={"query": test_query})
+                if response.status_code == 200:
+                    results = response.json()
+                    st.write("**Vector Search Results:**")
+                    st.json(results)
+                else:
+                    st.error("Vector search failed")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
     if st.button("Clear All Data"):
+        # Also clear backend data
+        try:
+            requests.post(f"{BACKEND_URL}/clear-document")
+        except:
+            pass
+
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()

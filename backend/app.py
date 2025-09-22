@@ -25,10 +25,27 @@ import urllib3
 # HuggingFace fallback
 from transformers import pipeline
 
+# Vector Database imports
+try:
+    import faiss
+    import numpy as np
+    from sentence_transformers import SentenceTransformer
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    import pickle
+    import os
+
+    VECTOR_DB_AVAILABLE = True
+    print("✅ FAISS vector database available")
+except ImportError as e:
+    VECTOR_DB_AVAILABLE = False
+    print(f"⚠️ FAISS not installed: {e}. Vector search will be disabled.")
+
 # SSL context configuration for Windows/Python 3.13 compatibility
 ssl_context_ = ssl.create_default_context(cafile=certifi.where())
 
 # Configure SSL for SendGrid compatibility
+import os
+
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
@@ -54,6 +71,10 @@ logger = logging.getLogger("uvicorn.error")
 parsed_text = ""
 chat_history = []
 current_filename = ""
+# FAISS vector store components
+faiss_index = None
+document_chunks = []
+embeddings_model = None
 
 
 @app.get("/")
@@ -64,19 +85,181 @@ def health():
 # Add a debug endpoint to check document status
 @app.get("/document-status")
 def get_document_status():
-    global parsed_text, current_filename
+    global parsed_text, current_filename, faiss_index
     return {
         "has_document": bool(parsed_text),
         "filename": current_filename,
         "text_length": len(parsed_text) if parsed_text else 0,
-        "text_preview": parsed_text[:200] if parsed_text else "No document loaded"
+        "text_preview": parsed_text[:200] if parsed_text else "No document loaded",
+        "vector_db_available": VECTOR_DB_AVAILABLE,
+        "vector_store_ready": faiss_index is not None,
+        "chunks_count": len(document_chunks) if document_chunks else 0
     }
+
+
+# FAISS Vector Database Setup Function
+def setup_faiss_vector_store(text_content: str, filename: str):
+    """Create and populate FAISS vector store"""
+    global faiss_index, document_chunks, embeddings_model
+
+    if not VECTOR_DB_AVAILABLE:
+        logger.warning("FAISS not available, skipping vector store setup")
+        return False
+
+    try:
+        # Initialize embeddings model (lightweight sentence transformer)
+        if embeddings_model is None:
+            embeddings_model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("Embeddings model loaded")
+
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=100,
+            length_function=len,
+        )
+
+        # Create chunks from the document
+        chunks = text_splitter.split_text(text_content)
+        logger.info(f"Split document into {len(chunks)} chunks")
+
+        if not chunks:
+            return False
+
+        # Create embeddings for all chunks
+        logger.info("Creating embeddings...")
+        chunk_embeddings = embeddings_model.encode(chunks, show_progress_bar=True)
+
+        # Create FAISS index
+        dimension = chunk_embeddings.shape[1]  # Usually 384 for all-MiniLM-L6-v2
+        faiss_index = faiss.IndexFlatIP(dimension)  # Inner Product similarity
+
+        # Normalize embeddings for cosine similarity
+        faiss.normalize_L2(chunk_embeddings)
+
+        # Add embeddings to index
+        faiss_index.add(chunk_embeddings.astype('float32'))
+
+        # Store chunks for retrieval
+        document_chunks = [
+            {
+                "text": chunk,
+                "source": filename,
+                "chunk_id": i
+            }
+            for i, chunk in enumerate(chunks)
+        ]
+
+        # Save to disk (optional)
+        save_path = "./faiss_store"
+        os.makedirs(save_path, exist_ok=True)
+
+        faiss.write_index(faiss_index, f"{save_path}/index.faiss")
+        with open(f"{save_path}/chunks.pkl", "wb") as f:
+            pickle.dump(document_chunks, f)
+
+        logger.info(f"FAISS vector store created successfully with {len(chunks)} chunks, dimension {dimension}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error setting up FAISS vector store: {e}")
+        faiss_index = None
+        document_chunks = []
+        return False
+
+
+# Enhanced search function using FAISS
+def enhanced_search_document(query: str) -> str:
+    """Search document using both traditional text search and FAISS vector similarity"""
+    global parsed_text, faiss_index, document_chunks, embeddings_model
+
+    logger.info(
+        f"Enhanced search. Text length: {len(parsed_text)}, FAISS ready: {faiss_index is not None}, Query: {query}")
+
+    if not parsed_text:
+        return "No document has been uploaded yet. Please upload a legal document first."
+
+    if not query.strip():
+        return "Please provide a search query."
+
+    results = []
+
+    # 1. Traditional keyword search (existing logic)
+    traditional_results = []
+    lines = parsed_text.split("\n")
+    query_words = query.lower().split()
+
+    for i, line in enumerate(lines):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+
+        if any(word in line_clean.lower() for word in query_words):
+            context_start = max(0, i - 1)
+            context_end = min(len(lines), i + 2)
+            context = " ".join(lines[context_start:context_end]).strip()
+            traditional_results.append(context)
+
+    # 2. FAISS vector similarity search (if available)
+    vector_results = []
+    if faiss_index is not None and embeddings_model is not None and document_chunks:
+        try:
+            # Create embedding for query
+            query_embedding = embeddings_model.encode([query])
+            faiss.normalize_L2(query_embedding)  # Normalize for cosine similarity
+
+            # Search for similar chunks
+            k = min(3, len(document_chunks))  # Top 3 or less if fewer chunks exist
+            similarities, indices = faiss_index.search(query_embedding.astype('float32'), k)
+
+            # Get results with similarity scores
+            for i, (similarity, idx) in enumerate(zip(similarities[0], indices[0])):
+                if idx != -1:  # Valid index
+                    chunk_data = document_chunks[idx]
+                    vector_results.append({
+                        "text": chunk_data["text"],
+                        "similarity": float(similarity),
+                        "chunk_id": chunk_data["chunk_id"]
+                    })
+
+            logger.info(f"FAISS search found {len(vector_results)} results")
+        except Exception as e:
+            logger.error(f"FAISS search error: {e}")
+
+    # Combine results
+    if vector_results:
+        results.append("🚀 **Most Relevant Sections (AI Similarity Search):**")
+        for i, result in enumerate(vector_results, 1):
+            similarity_percent = int(result["similarity"] * 100)
+            results.append(f"{i}. [{similarity_percent}% match] {result['text'].strip()}")
+
+    if traditional_results:
+        results.append("\n📝 **Keyword Matches:**")
+        unique_traditional = list(set(traditional_results))[:3]  # Remove duplicates, limit to 3
+        for i, result in enumerate(unique_traditional, 1):
+            results.append(f"{i}. {result.strip()}")
+
+    if not results:
+        # Fallback to broader search
+        broader_results = []
+        for line in lines:
+            line_clean = line.strip()
+            if len(line_clean) > 20:
+                broader_results.append(line_clean)
+
+        if broader_results:
+            return f"No direct matches found for '{query}'. Here are some key sections from the document:\n\n" + "\n\n".join(
+                broader_results[:3])
+        else:
+            return f"No relevant content found for '{query}' in the uploaded document."
+
+    return "\n\n".join(results)
 
 
 # ---------------- Parse ----------------
 @app.post("/parse")
 async def parse_file(file: UploadFile = File(...)):
-    global parsed_text, chat_history, current_filename
+    global parsed_text, chat_history, current_filename, vector_store
 
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded")
@@ -114,11 +297,20 @@ async def parse_file(file: UploadFile = File(...)):
         if not parsed_text:
             raise HTTPException(status_code=400, detail="Document appears to be empty or could not be parsed")
 
+        # Setup vector store in background (don't block the response)
+        vector_setup_success = False
+        if VECTOR_DB_AVAILABLE and len(parsed_text) > 100:  # Only if document is substantial
+            try:
+                vector_setup_success = setup_faiss_vector_store(parsed_text, file.filename)
+            except Exception as e:
+                logger.warning(f"FAISS setup failed (non-blocking): {e}")
+
         return {
             "filename": file.filename,
             "text": text[:500],
             "success": True,
-            "length": len(parsed_text)
+            "length": len(parsed_text),
+            "vector_db_enabled": vector_setup_success
         }
 
     except Exception as e:
@@ -205,8 +397,8 @@ def search_document(query: str) -> str:
 
 search_tool = Tool(
     name="SearchLegalText",
-    func=search_document,
-    description="Search the uploaded legal document for relevant clauses, terms, or content. Use this to find specific information within the uploaded document."
+    func=enhanced_search_document,  # Use the enhanced search function
+    description="Search the uploaded legal document for relevant clauses, terms, or content using both keyword matching and AI-powered semantic similarity search."
 )
 
 # Agent
@@ -415,8 +607,57 @@ async def send_email_alternative(email: str, report_text: str):
 # Add endpoint to clear document (useful for testing)
 @app.post("/clear-document")
 async def clear_document():
-    global parsed_text, chat_history, current_filename
+    global parsed_text, chat_history, current_filename, faiss_index, document_chunks, embeddings_model
     parsed_text = ""
     chat_history = []
     current_filename = ""
-    return {"status": "Document cleared"}
+    faiss_index = None
+    document_chunks = []
+    # Keep embeddings_model loaded for performance
+
+    # Clear FAISS files if available
+    if VECTOR_DB_AVAILABLE:
+        try:
+            import shutil
+            if os.path.exists("./faiss_store"):
+                shutil.rmtree("./faiss_store")
+                logger.info("FAISS store directory cleared")
+        except Exception as e:
+            logger.warning(f"Could not clear FAISS store: {e}")
+
+    return {"status": "Document and FAISS vector store cleared"}
+
+
+# Add endpoint to test vector search directly
+@app.post("/vector-search")
+async def vector_search(req: QueryRequest):
+    """Direct FAISS vector search endpoint for testing"""
+    global faiss_index, document_chunks, embeddings_model
+
+    if not faiss_index or not embeddings_model:
+        return {"error": "FAISS vector store not available"}
+
+    try:
+        # Create embedding for query
+        query_embedding = embeddings_model.encode([req.query])
+        faiss.normalize_L2(query_embedding)
+
+        # Search for similar chunks
+        k = min(5, len(document_chunks))
+        similarities, indices = faiss_index.search(query_embedding.astype('float32'), k)
+
+        results = []
+        for i, (similarity, idx) in enumerate(zip(similarities[0], indices[0])):
+            if idx != -1:
+                chunk_data = document_chunks[idx]
+                results.append({
+                    "chunk_id": chunk_data["chunk_id"],
+                    "content": chunk_data["text"][:200] + "..." if len(chunk_data["text"]) > 200 else chunk_data[
+                        "text"],
+                    "similarity": float(similarity),
+                    "similarity_percent": int(similarity * 100)
+                })
+
+        return {"results": results, "count": len(results)}
+    except Exception as e:
+        return {"error": str(e)}
