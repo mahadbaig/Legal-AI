@@ -11,6 +11,8 @@ from langchain_community.chat_models import ChatOpenAI
 from langchain_community.llms.openai import OpenAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
+from langchain.callbacks.manager import CallbackManager
+from langchain.callbacks.tracers.langchain import LangChainTracer
 
 # LangChain + Groq + Tools
 from langchain.agents import initialize_agent, Tool, AgentType
@@ -85,6 +87,10 @@ async def parse_file(file: UploadFile = File(...)):
     # return {"text": text}
     return {"filename": file.filename, "text": text[:500]}
 
+
+tracer = LangChainTracer(project_name=os.getenv("LANGCHAIN_PROJECT"))
+callback_manager = CallbackManager([tracer])
+
 # ---------------- Query ----------------
 class QueryRequest(BaseModel):
     query: str
@@ -92,7 +98,8 @@ class QueryRequest(BaseModel):
 llm = ChatGroq(
     model=os.getenv("MODEL_NAME", "mixtral-8x7b-32768"),
     api_key=os.getenv("GROQ_API_KEY"),
-    temperature=0
+    temperature=0,
+    callbacks=callback_manager,
 )
 
 # Web Search Tool
@@ -130,6 +137,7 @@ agent = initialize_agent(
     verbose=True,
     handle_parsing_errors=True,
     handle_unknown_errors=True,
+    callbacks=callback_manager,
 )
 
 STRUCTURED_PROMPT = f"""
@@ -179,7 +187,7 @@ async def query_doc(req: QueryRequest):
 
     try:
         query_with_instructions = f"{STRUCTURED_PROMPT}\n\nUser Question: {req.query}\n\n Context (extracted from uploaded document):{(parsed_text[:2000])}"
-        answer = agent.invoke({"input": query_with_instructions})
+        answer = agent.run(query_with_instructions)
         chat_history.append({"user": req.query, "ai": answer})
         return {"answer": f"{reasoning_summary}\n\n{answer}"}
     except Exception as e:
