@@ -1,11 +1,24 @@
-import requests
+# import requests
+#
+# url = "http://127.0.0.1:8000/parse"
+# file_path = "C:/Mahad/Agentic AI Bootcamp/Capstone Project/Legal AI/Agreement_TilesSupply_20150726.pdf"
+#
+# with open(file_path, "rb") as f:
+#     files = {"file": (file_path, f, "application/pdf")}
+#     response = requests.post(url, files=files)
+#
+# print(response.status_code)
+# print(response.json())
 
-url = "http://127.0.0.1:8000/parse"
-file_path = "C:/Mahad/Agentic AI Bootcamp/Capstone Project/Legal AI/Agreement_TilesSupply_20150726.pdf"
 
-with open(file_path, "rb") as f:
-    files = {"file": (file_path, f, "application/pdf")}
-    response = requests.post(url, files=files)
+from groq import Groq
+import os
 
-print(response.status_code)
-print(response.json())
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+resp = client.chat.completions.create(
+    model="mixtral-8x7b-32768",  # known Groq model
+    messages=[{"role": "user", "content": "Say hello from Groq"}]
+)
+
+print(resp.choices[0].message["content"])
