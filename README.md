@@ -41,7 +41,7 @@ An intelligent legal document analysis system powered by AI that helps users und
 
 ### 1. Clone the Repository
 ```bash
-git clone [<repository-url>](https://github.com/mahadbaig/Legal-AI)
+git clone https://github.com/mahadbaig/Legal-AI
 cd legal-ai
 ```
 
